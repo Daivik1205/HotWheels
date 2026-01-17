@@ -100,8 +100,8 @@ class MapCreator:
         
         # View properties
         self.zoom = 1.0
-        self.min_zoom = 0.1
-        self.max_zoom = 10.0
+        self.min_zoom = 0.001
+        self.max_zoom = 20.0
         self.offset_x = 0
         self.offset_y = 0
         
@@ -181,17 +181,20 @@ class MapCreator:
         
         # Tool buttons
         tools = [
-            ('pen', 'Pen'),
+            # ('pen', 'Pen'),
             ('eraser', 'Eraser'),
             ('rect', 'Rectangle'),
             ('filled_rect', 'Filled Rect'),
-            ('circle', 'Circle'),
-            ('filled_circle', 'Filled Circle'),
-            ('line', 'Line'),
+            # ('circle', 'Circle'),
+            # ('filled_circle', 'Filled Circle'),
+            # ('line', 'Line'),
+            ('door', 'Door'),
+            ('ramp', 'Ramp'),
+            ('elevator', 'elevator')
         ]
         
         buttons.append({'type': 'label', 'text': 'Tools:', 'y': y_offset})
-        y_offset += 25
+        y_offset += 30
         
         for tool_id, tool_name in tools:
             buttons.append({
