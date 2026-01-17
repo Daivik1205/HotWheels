@@ -98,6 +98,10 @@ class MapCreator:
         self.canvas_width = window_width - self.toolbar_width
         self.canvas_height = window_height - self.statusbar_height
         
+        # Start Entry 
+        self.x_start = -1 
+        self.y_start = -1
+
         # View properties
         self.zoom = 1.0
         self.min_zoom = 0.1
@@ -214,9 +218,6 @@ class MapCreator:
         func_types = [
             (FuncID.EMPTY, 'Empty'),
             (FuncID.WALKABLE, 'Walkable'),
-            (FuncID.RAMP, 'Ramp'),
-            (FuncID.DOOR, 'Door'),
-            (FuncID.ELEVATOR, 'Elevator'),
             (FuncID.STAIR, 'Stair'),
             (FuncID.OBSTACLE, 'Obstacle'),
         ]
@@ -231,7 +232,23 @@ class MapCreator:
                 'y': y_offset
             })
             y_offset += 35 + 5
-        
+        y_offset += 20
+        buttons.append({
+            'type': 'textbox',
+            'id': 'y_start',
+            'label': 'y_START',
+            'rect': pygame.Rect(10, y_offset, self.toolbar_width-20, 30)
+        })
+        y_offset += 40
+
+        buttons.append({
+            'type': 'textbox',
+            'id': 'x_start',
+            'label': 'y_START',
+            'rect': pygame.Rect(10, y_offset, self.toolbar_width-20, 30)
+        })
+        y_offset += 40
+
         # Text input sections
         buttons.append({'type': 'label', 'text': 'Settings:', 'y': y_offset})
         y_offset += 45  # Increased from 25 to 35
@@ -605,6 +622,12 @@ class MapCreator:
                 self.current_destinations = [d.strip() for d in dest_str.split(',') if d.strip()]
             else:
                 self.current_destinations = []
+        elif textbox_id == 'x_start':
+            x_val = self.textbox_content['x_start'].strip()
+            self.x_start = int(x_val)
+        elif textbox_id == 'y_start':
+            y_val = self.textbox_content['y_start'].strip()
+            self.y_start = int(y_val)
     
     def render_canvas(self):
         """Render the map canvas with optimizations"""
@@ -859,7 +882,7 @@ class MapCreator:
             text_surf = self.font_small.render(FuncID(func_id).name, True, self.COLORS['ui_text'])
             self.screen.blit(text_surf, (legend_x + 35, y_offset + 2))
             y_offset += 25
-    
+
     def render(self):
         """Main render function"""
         self.screen.fill(self.COLORS['background'])
