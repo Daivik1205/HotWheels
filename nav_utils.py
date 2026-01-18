@@ -109,14 +109,15 @@ class NavigationGraph:
 
 class DynamicLocalPlanner:
     """
-    D* Lite local planner with limited sight + corridor centering.
-    Unknown cells are assumed traversable but expensive until revealed.
+    D* Lite local planner with limited sight + strong wall avoidance.
 
-    The "center preference" is done by adding a clearance penalty
-    (cells close to obstacles cost more).
+    Key behavior:
+    - EMPTY is expensive (200)
+    - WALKABLE is cheap (1)
+    - cells near obstacles get huge extra penalty (clearance_cost)
     """
 
-    def __init__(self, map_info, start, goal):
+    def __init__(self, map_info, start, goal, initial_visible_cells=None):
         self.map = map_info
         self.start = start
         self.goal = goal
@@ -124,15 +125,18 @@ class DynamicLocalPlanner:
         self.gt_costs = self._build_ground_truth_cost_grid()
         self.clearance_cost = self._build_clearance_cost(self.gt_costs)
 
-        # unknown = expensive but traversable
+        # Unknown/unseen cells default to expensive (assume "empty")
         self.known_costs = np.ones_like(self.gt_costs, dtype=np.float32) * 5.0
 
         self._sanitize_start_goal()
 
         self.planner = DStarLite(self.start, self.goal, self.known_costs)
-
-        # warm compute so g-values start propagating
-        self.planner.compute(max_steps=20000)
+        
+        if initial_visible_cells is not None:
+            self.sense_and_update(initial_visible_cells)
+            self.planner.compute(max_steps=20000)
+        else:
+            self.planner.compute(max_steps=20000)
 
         sx, sy = self.start
         gx, gy = self.goal
@@ -140,29 +144,44 @@ class DynamicLocalPlanner:
 
     def _build_ground_truth_cost_grid(self):
         w, h = self.map.width, self.map.height
-        grid = np.ones((h, w), dtype=np.float32)  # [H,W]
+        grid = np.ones((h, w), dtype=np.float32)
+
         for y in range(h):
             for x in range(w):
                 p = self.map.map_data[y][x]
                 if p.func_id == FuncID.OBSTACLE or float(p.cost) >= 999:
                     grid[y, x] = np.inf
                 else:
+                    # only used as "base", real live cost comes from map_data anyway
                     grid[y, x] = max(1.0, float(p.cost))
         return grid
 
     def _build_clearance_cost(self, gt):
         """
-        BFS distance-to-obstacle, then turn it into a penalty:
-        nearer obstacles => higher penalty.
+        Distance-to-obstacle -> penalty.
+        Fixes:
+        - inflation is applied BEFORE BFS seed + BFS uses inflated obstacles
         """
         H, W = gt.shape
 
+        # Inflate obstacles (radius 1)
+        inflated = gt.copy()
+        for y in range(H):
+            for x in range(W):
+                if math.isinf(float(gt[y, x])):
+                    for dy in [-1, 0, 1]:
+                        for dx in [-1, 0, 1]:
+                            nx, ny = x + dx, y + dy
+                            if 0 <= nx < W and 0 <= ny < H:
+                                inflated[ny, nx] = np.inf
+
+        # BFS distance transform FROM inflated obstacles
         dist = np.full((H, W), 10**9, dtype=np.int32)
         q = []
 
         for y in range(H):
             for x in range(W):
-                if math.isinf(float(gt[y, x])):
+                if math.isinf(float(inflated[y, x])):
                     dist[y, x] = 0
                     q.append((x, y))
 
@@ -178,20 +197,28 @@ class DynamicLocalPlanner:
                         dist[ny, nx] = d
                         q.append((nx, ny))
 
-        max_near = 6
+        # ===== VERY STRONG WALL PENALTY =====
+        # "near" controls how wide the bad zone is
+        near = 6
+
+        # base_penalty controls how expensive near-wall becomes
+        base_penalty = 500.0
+
         penalty = np.zeros((H, W), dtype=np.float32)
 
         for y in range(H):
             for x in range(W):
-                if math.isinf(float(gt[y, x])):
+                if math.isinf(float(inflated[y, x])):
                     penalty[y, x] = np.inf
+                    continue
+
+                d = int(dist[y, x])
+
+                if d <= near:
+                    # explosive penalty near walls
+                    penalty[y, x] = base_penalty * float((near - d + 1) ** 2)
                 else:
-                    d = dist[y, x]
-                    if d <= max_near:
-                        # quadratic push away from walls
-                        penalty[y, x] = float((max_near - d + 1) ** 2)
-                    else:
-                        penalty[y, x] = 0.0
+                    penalty[y, x] = 0.0
 
         return penalty
 
@@ -204,13 +231,17 @@ class DynamicLocalPlanner:
             return
 
     def _true_cost_live(self, x, y):
-        """Read true cost from current map_data (supports dynamic obstacles)."""
         p = self.map.map_data[y][x]
         if p.func_id == FuncID.OBSTACLE or float(p.cost) >= 999:
             return np.inf
 
-        base = max(1.0, float(p.cost))
+        if p.func_id == FuncID.EMPTY:
+            base = 200.0
+        else:
+            base = max(1.0, float(p.cost))
+
         return base + float(self.clearance_cost[y, x])
+
 
     def sense_and_update(self, visible_cells):
         for (x, y) in visible_cells:
@@ -226,37 +257,123 @@ class DynamicLocalPlanner:
                 self.known_costs[y, x] = true_cost
                 self.planner.update_cell_cost((x, y), true_cost)
 
-    def step(self, compute_budget=1000):
-        nxt = self.planner.next(compute_budget=compute_budget)
-        if nxt is not None:
-            self.start = nxt
-            return nxt
+    def step(self, compute_budget=2000):
+        """
+        Jitter-free movement by path caching.
 
-        # Exploration fallback (keeps limited sight moving instead of freezing)
-        x, y = self.start
-        gx, gy = self.goal
+        Instead of choosing just the next neighbor each frame (which jitters),
+        we extract a short path from the current g-values and follow it.
 
-        best = None
-        best_h = 10**9
+        Replans only if:
+        - cache is empty
+        - next cached step is no longer valid
+        - goal changed (rare)
+        """
 
-        for dx, dy in [(1,0), (-1, 0), (0, 1), (0, -1),
-                       (1, 1), (-1, 1), (-1, -1), (1, -1)]:
-            nx, ny = x + dx, y + dy
+        # init cache
+        if not hasattr(self, "_path_cache"):
+            self._path_cache = []
 
-            # FIXED BUG: bounds check was wrong in your current file
-            if 0 <= nx < self.map.width and 0 <= ny < self.map.height:
-                if not math.isinf(float(self.known_costs[ny, nx])):
-                    h = abs(nx - gx) + abs(ny - gy)
-                    if h < best_h:
-                        best_h = h
-                        best = (nx, ny)
+        # helper: legal move according to D* Lite
+        def is_valid_step(curr, nxt):
+            for s in self.planner.successors(curr):
+                if s == nxt:
+                    return True
+            return False
 
-        if best is not None:
+        # if we have a cached step, use it
+        if self._path_cache:
+            nxt = self._path_cache[0]
+            if is_valid_step(self.start, nxt):
+                self._path_cache.pop(0)
+                self.planner.move_start(nxt)
+                self.start = nxt
+                return nxt
+            else:
+                # cached path became invalid -> drop it
+                self._path_cache = []
+
+        # compute more before extracting path
+        self.planner.compute(max_steps=compute_budget)
+
+        # extract a path by repeatedly selecting best successor
+        path = []
+        cur = self.start
+        prev = None
+
+        for _ in range(100):  # cache length (tune 10..60)
+            if cur == self.goal:
+                break
+
+            best = None
+            best_rank = (10**18, 10**18, 10**18)
+
+            for s in self.planner.successors(cur):
+                # normal D* successor scoring
+                move_cost = self.planner.cost(cur, s)
+                if math.isinf(move_cost):
+                    continue
+
+                val = self.planner.g[s] + move_cost
+                if math.isinf(val):
+                    continue
+
+                # strong anti-jitter tie break:
+                # 1) val
+                # 2) avoid backtracking
+                # 3) prefer straight toward goal
+                backtrack = 1 if (prev is not None and s == prev) else 0
+                hgoal = abs(s[0] - self.goal[0]) + abs(s[1] - self.goal[1])
+
+                rank = (val, backtrack, hgoal)
+                if rank < best_rank:
+                    best_rank = rank
+                    best = s
+
+            if best is None:
+                break
+
+            path.append(best)
+            prev = cur
+            cur = best
+
+        # if we couldn't build path, fallback greedy (won't freeze)
+        if not path:
+            x, y = self.start
+            gx, gy = self.goal
+
+            best = None
+            best_score = 10**18
+
+            for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.map.width and 0 <= ny < self.map.height:
+                    cand = (nx, ny)
+                    if not is_valid_step(self.start, cand):
+                        continue
+                    c = float(self.known_costs[ny, nx])
+                    if math.isinf(c):
+                        continue
+
+                    score = (abs(nx - gx) + abs(ny - gy)) * 10.0 + c
+                    if score < best_score:
+                        best_score = score
+                        best = cand
+
+            if best is None:
+                return None
+
             self.planner.move_start(best)
             self.start = best
             return best
 
-        return None
+        # store cache and take first step now
+        self._path_cache = path[1:]  # keep remaining
+        first = path[0]
+
+        self.planner.move_start(first)
+        self.start = first
+        return first
 
 
 def navigate_multi_map(nav_graph: NavigationGraph,

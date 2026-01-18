@@ -196,14 +196,17 @@ class Simulator:
         self.seq_idx = 0
         cp = self.full_res['checkpoints'][self.sequence[0]]
         print("START", cp["start"], "GOAL", cp["goal"])
+        
+        temp_wc = Wheelchair(*cp['start'])
+        initial_visible = temp_wc.visible_cells(self.nav_graph.maps[self.sequence[0]].map_data, radius=5)
 
         self.local_planner = DynamicLocalPlanner(
             self.nav_graph.maps[self.sequence[0]],
             cp['start'],
-            cp['goal']
+            cp['goal'],
+            initial_visible_cells = initial_visible
         )
 
-        # FIX: must use checkpoint start, not original start_pt
         self.wheelchair = Wheelchair(*cp['start'])
         self.wc_map_id = self.cur_map
         self.traced_path = [cp['start']]
@@ -235,7 +238,8 @@ class Simulator:
 
             if self.is_moving and self.local_planner:
                 visible = self.wheelchair.visible_cells(self.map_data, radius=5)
-                self.local_planner.sense_and_update(visible)
+                if self.anim_frame % 3 == 0:
+                    self.local_planner.sense_and_update(visible)
 
                 nxt = self.local_planner.step(compute_budget=1200)
 

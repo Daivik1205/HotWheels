@@ -13,26 +13,24 @@ MOVES = [
 
 class DStarLite:
     """
-    D* Lite over a 2D cost grid.
-
-    Conventions:
-    - grid is numpy array shape (H, W)
-    - access as grid[y, x]
-    - grid[y, x] is cost to ENTER cell (x,y)
-    - obstacles => INF
+    Correct D* Lite using grid[y, x] with shape (H, W).
+    grid[y, x] = cost to enter cell (x,y)
+    blocked => INF
     """
 
     def __init__(self, start, goal, grid):
-        self.grid = grid  # [H, W]
+        self.grid = grid  # [H,W]
         self.start = start
         self.goal = goal
 
-        self.last = start
+        self.last = start          # used for km update
+        self.prev_pos = None       # TRUE previous position (for jitter kill)
+
         self.km = 0.0
 
         self.g = {}
         self.rhs = {}
-        self.U = []  # heap of (key, node)
+        self.U = []
 
         H, W = self.grid.shape
         for y in range(H):
@@ -54,7 +52,7 @@ class DStarLite:
         return (c > 0.0) and (not math.isinf(c))
 
     def h(self, a, b):
-        # Manhattan heuristic is stable
+        # Manhattan is stable
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
     def key(self, s):
@@ -83,12 +81,25 @@ class DStarLite:
     def successors(self, s):
         sx, sy = s
         for dx, dy, _ in MOVES:
-            ns = (sx + dx, sy + dy)
-            if self.in_bounds(ns) and self.traversable(ns):
-                yield ns
+            nx, ny = sx + dx, sy + dy
+            ns = (nx, ny)
+
+            if not self.in_bounds(ns):
+                continue
+            if not self.traversable(ns):
+                continue
+
+            # FORBID diagonal corner cutting
+            if dx != 0 and dy != 0:
+                if not (
+                    self.traversable((sx + dx, sy)) and
+                    self.traversable((sx, sy + dy))
+                ):
+                    continue
+
+            yield ns
 
     def predecessors(self, s):
-        # symmetric moves
         return self.successors(s)
 
     def update_vertex(self, u):
@@ -100,7 +111,6 @@ class DStarLite:
                     best = cand
             self.rhs[u] = best
 
-        # lazy duplicates in heap
         heapq.heappush(self.U, (self.key(u), u))
 
     def _top_key(self):
@@ -127,7 +137,6 @@ class DStarLite:
 
             if self.g[u] > self.rhs[u]:
                 self.g[u] = self.rhs[u]
-                # update PREDECESSORS
                 for p in self.predecessors(u):
                     self.update_vertex(p)
             else:
@@ -160,19 +169,58 @@ class DStarLite:
         self.start = new_start
 
     def next(self, compute_budget=800):
-        # time-sliced compute
         self.compute(max_steps=compute_budget)
 
-        best, best_val = None, INF
-        for s in self.successors(self.start):
-            val = self.g[s] + self.cost(self.start, s)
-            if val < best_val:
-                best_val = val
-                best = s
-
-        if best is None or math.isinf(best_val):
+        succs = list(self.successors(self.start))
+        if not succs:
             return None
 
+        # REAL previous (used only to stop jitter)
+        prev = self.prev_pos
+
+        # Direction we were traveling
+        prev_dir = None
+        if prev is not None:
+            prev_dir = (self.start[0] - prev[0], self.start[1] - prev[1])
+
+        best = None
+        best_rank = (INF, INF, INF, INF)
+
+        for s in succs:
+            step_cost = self.cost(self.start, s)
+            if math.isinf(step_cost):
+                continue
+
+            # primary D* metric
+            val = self.g[s] + step_cost
+            if math.isinf(val):
+                continue
+
+            # jitter killers
+            backtrack = 1 if (prev is not None and s == prev) else 0
+            h_goal = self.h(s, self.goal)
+
+            # prefer going straight if possible
+            step_dir = (s[0] - self.start[0], s[1] - self.start[1])
+            turn = 0
+            if prev_dir is not None and step_dir != prev_dir:
+                turn = 1
+
+            # RANK ORDER is important:
+            # 1) best D* value
+            # 2) avoid going back
+            # 3) avoid turning
+            # 4) closer to goal
+            rank = (val, backtrack, turn, h_goal)
+
+            if rank < best_rank:
+                best_rank = rank
+                best = s
+
+        if best is None:
+            return None
+
+        # update prev_pos BEFORE moving start
         self.move_start(best)
         return best
 
