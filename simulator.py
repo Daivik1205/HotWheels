@@ -192,6 +192,7 @@ class Simulator:
 
         self.seq_idx = 0
         cp = self.full_res['checkpoints'][self.sequence[0]]
+        print("START", cp["start"], "GOAL", cp["goal"])
 
         self.local_planner = DynamicLocalPlanner(
             self.nav_graph.maps[self.sequence[0]],
@@ -238,13 +239,16 @@ class Simulator:
                 visible = self.wheelchair.visible_cells(self.map_data, radius=5)
                 self.local_planner.sense_and_update(visible)
 
-                nxt = self.local_planner.step()
+                nxt = self.local_planner.step(compute_budget=1000)
 
-                # NO PATH → STOP SAFELY
                 if nxt is None:
-                    self.is_moving = False
-                    print("D* Lite: Path blocked, stopping safely.")
+                    self.no_move_frames = getattr(self, "no_move_frames", 0) + 1
+                    if self.no_move_frames > 60:
+                        self.is_moving = False
+                        print("D* Lite: Path Blocked (timeout), stopping safely")
                     return
+                else:
+                    self.no_move_frames = 0
 
                 self.wheelchair.update_pos(nxt)
                 self.traced_path.append(nxt)
